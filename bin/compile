@@ -13,6 +13,7 @@ unset GIT_DIR
 # config
 SCONS_VERSION="1.2.0"
 S3_BUCKET="heroku-buildpack-nodejs"
+CUSTOM_ADDR="http://<addressToYourOracleClientTarballDirectory/"
 
 # parse and derive params
 BUILD_DIR=$1
@@ -54,9 +55,13 @@ function run_npm() {
 
 function manifest_versions() {
   if [ -f "${BUILDPACK_CACHE}/manifest.${1}" ]; then
-    cat "${BUILDPACK_CACHE}/manifest.${1}" | tr -s '\n' ' '
+     cat "${BUILDPACK_CACHE}/manifest.${1}" | tr -s '\n' ' '
   else
-    curl "http://${S3_BUCKET}.s3.amazonaws.com/manifest.${1}" -s -o - | tr -s '\n' ' '
+    if [ $# -eq 2 ];then
+      curl "${CUSTOM_ADDR}/manifest.${1}" -s -o - | tr -s '\n' ' '
+    else
+      curl "http://${S3_BUCKET}.s3.amazonaws.com/manifest.${1}" -s -o - | tr -s '\n' ' '
+    fi
   fi
 }
 
@@ -79,6 +84,7 @@ function resolve_version() {
 }
 
 function package_engine_version() {
+   
   version=$(cat $BUILD_DIR/package.json | $bootstrap_node/bin/node $LP_DIR/vendor/json/json engines.$1 2>/dev/null)
   if [ $? == 0 ]; then
     echo $version | sed -e 's/\([<>=]\) /\1/g'
@@ -112,8 +118,15 @@ function package_fetch_from_cache() {
 function package_fetch_from_curl() {
   filename=$1
   destination=$2
+  remoteLocation=$3
 
-  package="http://${S3_BUCKET}.s3.amazonaws.com/$filename"
+  if [ $# -eq 3 ];then
+        package="$remoteLocation/$filename"
+  else
+        package="http://${S3_BUCKET}.s3.amazonaws.com/$filename"
+  fi
+
+  echo "------> PACKAGE TO DOWNLOAD: $package"
   curl $package -s -o $destination/$filename
 }
 
@@ -121,6 +134,7 @@ function package_download() {
   engine="$1"
   version="$2"
   location="$3"
+  customLocation="$4"
 
   mkdir -p $location
   package_name="$engine-$version.tgz"
@@ -128,10 +142,11 @@ function package_download() {
 
   status=$(package_fetch_from_cache $package_name $destination)
   if [ $status != 0 ]; then
-    package_fetch_from_curl $package_name $destination
+    package_fetch_from_curl $package_name $destination $customLocation
   fi
   tar xzf $package_name -C $location
 }
+
 
 bootstrap_node=$(mktmpdir bootstrap_node)
 package_download "nodejs" "0.4.7" $bootstrap_node
@@ -143,6 +158,7 @@ declare -A engine_requests
 
 engine_defaults["node"]="0.10.x"
 engine_defaults["npm"]="1.2.x"
+engine_defaults["oracle_client"]="11.2.0"
 
 engine_versions["node"]=$(manifest_versions "nodejs")
 engine_requests["node"]=$(package_engine_version "node")
@@ -150,6 +166,10 @@ engine_requests["node"]=$(package_engine_version "node")
 engine_versions["npm"]=$(manifest_versions "npm")
 engine_requests["npm"]=$(package_engine_version "npm")
 
+engine_versions["oracle_client"]=$(manifest_versions "oracle_client" "custom")
+engine_requests["oracle_client"]=$(package_engine_version "oracle_client")
+
+echo "-----> Running Custom Oracle Buildpack"
 echo "-----> Resolving engine versions"
 
 # add a warning if no version of node specified
@@ -166,9 +186,13 @@ echo "Using Node.js version: ${NODE_VERSION}" | indent
 NPM_VERSION=$(package_resolve_version "npm")
 echo "Using npm version: ${NPM_VERSION}" | indent
 
+ORACLE_CLIENT_VERSION=$(package_resolve_version "oracle_client")
+echo "Using oracle client version: ${ORACLE_CLIENT_VERSION}" | indent
+
 # cache directories
 CACHE_STORE_DIR="$CACHE_DIR/node_modules/$NODE_VERSION/$NPM_VERSION"
 CACHE_TARGET_DIR="$BUILD_DIR/node_modules"
+
 
 # s3 packages
 NODE_PACKAGE="http://${S3_BUCKET}.s3.amazonaws.com/nodejs-${NODE_VERSION}.tgz"
@@ -179,12 +203,33 @@ SCONS_PACKAGE="http://${S3_BUCKET}.s3.amazonaws.com/scons-${SCONS_VERSION}.tgz"
 VENDORED_NODE="$(mktmpdir node)"
 VENDORED_NPM="$(mktmpdir npm)"
 VENDORED_SCONS="$(mktmpdir scons)"
+VENDORED_ORACLE_CLIENT="$(mktmpdir oracle_client)"
 
 # download and unpack packages
 echo "-----> Fetching Node.js binaries"
 package_download "nodejs" "${NODE_VERSION}" "${VENDORED_NODE}"
 package_download "npm" "${NPM_VERSION}" "${VENDORED_NPM}"
 package_download "scons" "${SCONS_VERSION}" "${VENDORED_SCONS}"
+package_download "oracle_client" "${ORACLE_CLIENT_VERSION}" "${VENDORED_ORACLE_CLIENT}" "${CUSTOM_ADDR}"
+
+############ ORACLE ADDED SECTION #######################
+export OCI_INCLUDE_DIR=$PWD/instantclient/sdk/include/
+export OCI_LIB_DIR=$PWD/instantclient/
+export LD_LIBRARY_PATH=$PWD/instantclient/
+
+echo "----> Unpackaging Oracle client"
+tar zxf ./oracle_client-${ORACLE_CLIENT_VERSION}.tgz
+echo "----> Removing oracle compressed package"
+rm ./oracle_client-${ORACLE_CLIENT_VERSION}.tgz
+echo "----> Adding symbolic links for oracle libraries"
+
+mv instantclient* instantclient
+cd instantclient
+ln -s libocci.so.11.1 libocci.so
+ln -s libclntsh.so.11.1 libclntsh.so
+echo "----> Oracle Client setup complete"
+
+############ END ORACLE ADDED SECTION #######################
 
 # vendor node into the slug
 PATH="$BUILD_DIR/bin:$PATH"
@@ -207,3 +252,11 @@ echo "Dependencies installed" | indent
 echo "-----> Building runtime environment"
 mkdir -p $BUILD_DIR/.profile.d
 echo "export PATH=\"\$HOME/bin:\$HOME/node_modules/.bin:\$PATH\"" > $BUILD_DIR/.profile.d/nodejs.sh
+
+############ ORACLE ADDED ENVIRONMENT VARIABLES #######################
+echo "-----> Adding ORACLE environment variables"
+echo "export OCI_INCLUDE_DIR=\"\$PWD/instantclient/sdk/include/\"" >> $BUILD_DIR/.profile.d/nodejs.sh
+echo "export OCI_LIB_DIR=\"\$PWD/instantclient/\"" >> $BUILD_DIR/.profile.d/nodejs.sh
+echo "export LD_LIBRARY_PATH=\"\$PWD/instantclient/\"" >> $BUILD_DIR/.profile.d/nodejs.sh
+echo "-----> NodeJS Oracle Compile script complete"
+############ END ORACLE ADDED ENVIRONMENT VARIABLES #######################
