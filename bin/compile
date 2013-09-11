@@ -136,11 +136,26 @@ if [ "${engine_requests["node"]}" == "" ]; then
   echo
 fi
 
+useNpm="true"
+# add a warning if no version of node specified
+if [ "${engine_requests["cfNpmInstall"]}" == "false" ]; then
+        echo "-----> Using NPM"
+        useNpm="false"
+
+        echo
+        echo "INFO: cfNpmInstall:true flag is not set in package.json.   Skipping cloudfoundry NPM install:" | indent
+        echo
+        echo "cfNpmInstall value: ${engine_requests["cfNpmInstall"]}"
+fi
+
+
 NODE_VERSION=$(package_resolve_version "node")
 echo "Using Node.js version: ${NODE_VERSION}" | indent
 
-NPM_VERSION=$(package_resolve_version "npm")
-echo "Using npm version: ${NPM_VERSION}" | indent
+if [ "${useNpm}" == "true" ]; then
+	NPM_VERSION=$(package_resolve_version "npm")
+	echo "Using npm version: ${NPM_VERSION}" | indent
+fi
 
 # cache directories
 CACHE_STORE_DIR="$CACHE_DIR/node_modules/$NODE_VERSION/$NPM_VERSION"
@@ -159,7 +174,10 @@ VENDORED_SCONS="$(mktmpdir scons)"
 # download and unpack packages
 echo "-----> Fetching Node.js binaries"
 package_download "nodejs" "${NODE_VERSION}" "${VENDORED_NODE}"
-package_download "npm" "${NPM_VERSION}" "${VENDORED_NPM}"
+if [ "${useNpm}" == "true" ]; then
+	package_download "npm" "${NPM_VERSION}" "${VENDORED_NPM}"
+fi
+
 package_download "scons" "${SCONS_VERSION}" "${VENDORED_SCONS}"
 
 # vendor node into the slug
@@ -174,11 +192,13 @@ INCLUDE_PATH="$VENDORED_NODE/include"
 export CPATH="$INCLUDE_PATH:$CPATH"
 export CPPPATH="$INCLUDE_PATH:$CPPPATH"
 
-# install dependencies with npm
-echo "-----> Installing dependencies with npm"
-run_npm "install --production"
-run_npm "rebuild"
-echo "Dependencies installed" | indent
+if [ "${useNpm}" == "true" ]; then
+	# install dependencies with npm
+	echo "-----> Installing dependencies with npm"
+	run_npm "install --production"
+	run_npm "rebuild"
+	echo "Dependencies installed" | indent
+fi
 
 echo "-----> Building runtime environment"
 mkdir -p $BUILD_DIR/.profile.d
